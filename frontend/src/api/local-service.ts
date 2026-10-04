@@ -1,7 +1,7 @@
 import { MODULE_BY_KEY } from '@/data/modules'
 import { allRows, listRows, resetRows, saveRows } from '@/data/local-store'
+import { reconcileDefectRead, deriveDefect } from '@/api/defect-service'
 import type { ActionResult, EntryRow, ModuleMeta, OverviewResult, PageResult } from '@/data/types'
-
 // 会写进数据的「往回走」动作：命中就把这条记录标成异常态，看板上能一眼看出来。
 const NEGATIVE_ACTIONS = ['撤销', '作废', '拒绝', '驳回', '停用', '忽略', '下线', '回滚']
 
@@ -29,6 +29,10 @@ export function listEntries(key: string, filters: Record<string, string> = {}): 
 }
 
 export function runAction(key: string, id: number, action: string): ActionResult {
+  if (key === 'defect') {
+    // 缺陷消缺有独立的闭环状态机（顺流、回滚、台账、权限），不许从通用动作旁路。
+    return { ok: false, message: '消缺状态流转请走缺陷消缺页的专用操作入口' }
+  }
   const meta = moduleMeta(key)
   const target = meta.actionTargets[action]
   if (!target) {
@@ -85,9 +89,21 @@ export function downloadEntries(key: string): void {
 }
 
 export function loadOverview(): OverviewResult {
+  // 缺陷模块先跑统一口径校准，概览里的“待处理/异常量”才不会和缺陷页、详情、册子打架。
+  reconcileDefectRead()
   const rows = allRows()
   const modules = [...MODULE_BY_KEY.values()].map((meta) => {
-    const entries = rows[meta.key] ?? []
+    const entries = (rows[meta.key] as EntryRow[] | undefined) ?? []
+    if (meta.key === 'defect') {
+      // 缺陷异常量只算“未闭环且超期”，历史已闭环的超期结论不计入当前异常。
+      const abnormal = entries.filter((row) => String(row.status) !== '已闭环' && deriveDefect(row).overdue).length
+      return {
+        name: meta.name,
+        created: entries.length,
+        pending: entries.filter((row) => String(row.status) !== '已闭环').length,
+        abnormal,
+      }
+    }
     return {
       name: meta.name,
       created: entries.length,
